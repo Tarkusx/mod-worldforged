@@ -1,0 +1,8 @@
+# Phase 7A review candidate. Disabled and fail-closed by default.
+Worldforged.Enable = 0
+Worldforged.PrototypeMode = 1
+Worldforged.PowerEffects.Enable = 0
+Worldforged.PersonalLoot.Enable = 1
+Worldforged.Debug = 1
+# Dedicated prototype template; display 259 is copied from reviewed visual donor entry 2844.
+Worldforged.GameObject.Entry = 900001

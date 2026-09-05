@@ -1,0 +1,18 @@
+-- DO NOT APPLY
+-- PHASE 7B REVIEW ARTIFACT
+-- Character database. MAIL_TRANSACTION_DELIVERY: this row is inserted in the
+-- same transaction as item_instance, mail, and mail_items.
+CREATE TABLE `worldforged_character_loot` (
+  `character_guid` int unsigned NOT NULL,
+  `worldforged_spawn_guid` varchar(96) NOT NULL,
+  `item_entry` int unsigned NOT NULL,
+  `state` tinyint unsigned NOT NULL COMMENT '1=DELIVERED; no durable pending state',
+  `delivered_item_guid` int unsigned NOT NULL,
+  `delivered_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`character_guid`,`worldforged_spawn_guid`),
+  UNIQUE KEY `uq_worldforged_delivered_item` (`delivered_item_guid`),
+  KEY `idx_worldforged_character_state` (`character_guid`,`state`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Character-delete cleanup is appended by PlayerScript::OnPlayerDeleteFromDB
+-- to the core deletion transaction; no foreign key is required.

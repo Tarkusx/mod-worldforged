@@ -1,0 +1,65 @@
+{
+  "version": "v0.1.0-prototype",
+  "records": [
+    {
+      "item_entry": 450705,
+      "name": "Dustrunner Bindings",
+      "map": 1,
+      "area": 14,
+      "x": -89.1741823364257,
+      "y": -4044.7172337158204,
+      "z": 64.2366409,
+      "orientation": 0.0,
+      "spawn_identifier": "1-5-0-450705-0.3920-0.5390",
+      "provenance": "derived review data"
+    },
+    {
+      "item_entry": 450523,
+      "name": "Enchanted Straw Appendage",
+      "map": 0,
+      "area": 62,
+      "x": -9775.973166210937,
+      "y": -868.4824843261717,
+      "z": 39.5238571,
+      "orientation": 0.0,
+      "spawn_identifier": "2-31-0-450523-0.6936-0.7919",
+      "provenance": "derived review data"
+    },
+    {
+      "item_entry": 450711,
+      "name": "Sailor's Gambeson",
+      "map": 1,
+      "area": 372,
+      "x": -57.44918343505856,
+      "y": -4959.9834203247065,
+      "z": 21.421875,
+      "orientation": 0.0,
+      "spawn_identifier": "1-5-0-450711-0.5670-0.5291",
+      "provenance": "derived review data"
+    },
+    {
+      "item_entry": 521079,
+      "name": "Bloodtalon Vestments",
+      "map": 1,
+      "area": 368,
+      "x": -1363.461638208008,
+      "y": -5139.758407873534,
+      "z": 1.65644681,
+      "orientation": 0.0,
+      "spawn_identifier": "1-5-0-521079-0.6014-0.8381",
+      "provenance": "derived review data"
+    },
+    {
+      "item_entry": 450696,
+      "name": "Quilbow",
+      "map": 1,
+      "area": 816,
+      "x": 92.01081138916015,
+      "y": -4551.788448596191,
+      "z": 55.7291489,
+      "orientation": 0.0,
+      "spawn_identifier": "1-5-0-450696-0.4896-0.4868",
+      "provenance": "derived review data"
+    }
+  ]
+}
