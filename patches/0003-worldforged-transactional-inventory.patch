@@ -1,0 +1,282 @@
+diff --git a/src/server/database/Database/DatabaseWorkerPool.cpp b/src/server/database/Database/DatabaseWorkerPool.cpp
+index f539e2a6a..0ffd9896f 100644
+--- a/src/server/database/Database/DatabaseWorkerPool.cpp
++++ b/src/server/database/Database/DatabaseWorkerPool.cpp
+@@ -304,34 +304,32 @@ TransactionCallback DatabaseWorkerPool<T>::AsyncCommitTransaction(SQLTransaction
+ 
+ template <class T>
+ void DatabaseWorkerPool<T>::DirectCommitTransaction(SQLTransaction<T>& transaction)
++{
++    (void)DirectCommitTransactionWithResult(transaction);
++}
++
++template <class T>
++int DatabaseWorkerPool<T>::DirectCommitTransactionWithResult(SQLTransaction<T>& transaction)
+ {
+     T* connection = GetFreeConnection();
+     int errorCode = connection->ExecuteTransaction(transaction);
++    bool transactionAttemptedRetry = errorCode == ER_LOCK_DEADLOCK;
+ 
+-    if (!errorCode)
+-    {
+-        connection->Unlock();      // OK, operation succesful
+-        return;
+-    }
+-
+-    //! Handle MySQL Errno 1213 without extending deadlock to the core itself
+-    /// @todo More elegant way
++    //! Preserve the legacy deadlock retry policy, returning only the final result.
+     if (errorCode == ER_LOCK_DEADLOCK)
+     {
+-        //todo: handle multiple sync threads deadlocking in a similar way as async threads
+         uint8 loopBreaker = 5;
+-
+-        for (uint8 i = 0; i < loopBreaker; ++i)
+-        {
+-            if (!connection->ExecuteTransaction(transaction))
+-                break;
+-        }
++        for (uint8 i = 0; i < loopBreaker && errorCode == ER_LOCK_DEADLOCK; ++i)
++            errorCode = connection->ExecuteTransaction(transaction);
+     }
+ 
+-    //! Clean up now.
+-    transaction->Cleanup();
++    // Preserve the legacy cleanup lifecycle after an initial deadlock, even
++    // when a subsequent retry succeeds.
++    if (errorCode || transactionAttemptedRetry)
++        transaction->Cleanup();
+ 
+     connection->Unlock();
++    return errorCode;
+ }
+ 
+ template <class T>
+diff --git a/src/server/database/Database/DatabaseWorkerPool.h b/src/server/database/Database/DatabaseWorkerPool.h
+index d9b418b1b..2f3f41774 100644
+--- a/src/server/database/Database/DatabaseWorkerPool.h
++++ b/src/server/database/Database/DatabaseWorkerPool.h
+@@ -181,6 +181,10 @@ public:
+     //! were appended to the transaction will be respected during execution.
+     void DirectCommitTransaction(SQLTransaction<T>& transaction);
+ 
++    //! Synchronous transaction execution with the final database error result.
++    //! Returns 0 only when every statement and COMMIT succeed.
++    int DirectCommitTransactionWithResult(SQLTransaction<T>& transaction);
++
+     //! Method used to execute ad-hoc statements in a diverse context.
+     //! Will be wrapped in a transaction if valid object is present, otherwise executed standalone.
+     void ExecuteOrAppend(SQLTransaction<T>& trans, std::string_view sql);
+diff --git a/src/server/database/Database/Implementation/CharacterDatabase.cpp b/src/server/database/Database/Implementation/CharacterDatabase.cpp
+index 230715ecd..c8dc052f4 100644
+--- a/src/server/database/Database/Implementation/CharacterDatabase.cpp
++++ b/src/server/database/Database/Implementation/CharacterDatabase.cpp
+@@ -138,6 +138,8 @@ void CharacterDatabaseConnection::DoPrepareStatements()
+     PrepareStatement(CHAR_INS_ITEM_BOP_TRADE, "INSERT INTO item_soulbound_trade_data VALUES (?, ?)", CONNECTION_ASYNC);
+     PrepareStatement(CHAR_REP_INVENTORY_ITEM, "REPLACE INTO character_inventory (guid, bag, slot, item) VALUES (?, ?, ?, ?)", CONNECTION_ASYNC);
+     PrepareStatement(CHAR_REP_ITEM_INSTANCE, "REPLACE INTO item_instance (itemEntry, owner_guid, creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text, guid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", CONNECTION_ASYNC);
++    PrepareStatement(CHAR_REP_INVENTORY_ITEM_SYNCH, "REPLACE INTO character_inventory (guid, bag, slot, item) VALUES (?, ?, ?, ?)", CONNECTION_SYNCH);
++    PrepareStatement(CHAR_REP_ITEM_INSTANCE_SYNCH, "REPLACE INTO item_instance (itemEntry, owner_guid, creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text, guid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", CONNECTION_SYNCH);
+     PrepareStatement(CHAR_UPD_ITEM_INSTANCE, "UPDATE item_instance SET itemEntry = ?, owner_guid = ?, creatorGuid = ?, giftCreatorGuid = ?, count = ?, duration = ?, charges = ?, flags = ?, enchantments = ?, randomPropertyId = ?, durability = ?, playedTime = ?, text = ? WHERE guid = ?", CONNECTION_ASYNC);
+     PrepareStatement(CHAR_UPD_ITEM_INSTANCE_ON_LOAD, "UPDATE item_instance SET duration = ?, flags = ?, durability = ? WHERE guid = ?", CONNECTION_ASYNC);
+     PrepareStatement(CHAR_UPD_ITEM_COUNT, "UPDATE item_instance SET count = ? WHERE guid = ?", CONNECTION_ASYNC);
+diff --git a/src/server/database/Database/Implementation/CharacterDatabase.h b/src/server/database/Database/Implementation/CharacterDatabase.h
+index 441147e57..136af0a9b 100644
+--- a/src/server/database/Database/Implementation/CharacterDatabase.h
++++ b/src/server/database/Database/Implementation/CharacterDatabase.h
+@@ -546,6 +546,12 @@ enum CharacterDatabaseStatements : uint32
+     CHAR_SEL_WORLD_STATE,
+     CHAR_REP_WORLD_STATE,
+ 
++    // Synchronous equivalents used only by callers building a detached,
++    // already-owned inventory transaction. Existing async statements remain
++    // unchanged.
++    CHAR_REP_INVENTORY_ITEM_SYNCH,
++    CHAR_REP_ITEM_INSTANCE_SYNCH,
++
+     CHAR_NO_OP_PROVIDE_REALM_CONTEXT,
+ 
+     MAX_CHARACTERDATABASE_STATEMENTS
+diff --git a/src/server/database/Database/MySQLConnection.cpp b/src/server/database/Database/MySQLConnection.cpp
+index b62d0ed82..ee4827c78 100644
+--- a/src/server/database/Database/MySQLConnection.cpp
++++ b/src/server/database/Database/MySQLConnection.cpp
+@@ -379,6 +379,11 @@ void MySQLConnection::CommitTransaction()
+     Execute("COMMIT");
+ }
+ 
++bool MySQLConnection::CommitTransactionChecked()
++{
++    return Execute("COMMIT");
++}
++
+ int MySQLConnection::ExecuteTransaction(std::shared_ptr<TransactionBase> transaction)
+ {
+     std::vector<SQLElementData> const& queries = transaction->m_queries;
+@@ -449,7 +454,12 @@ int MySQLConnection::ExecuteTransaction(std::shared_ptr<TransactionBase> transac
+     // This is done in calling functions DatabaseWorkerPool<T>::DirectCommitTransaction and TransactionTask::Execute,
+     // and not while iterating over every element.
+ 
+-    CommitTransaction();
++    if (!CommitTransactionChecked())
++    {
++        uint32 errorCode = GetLastError();
++        RollbackTransaction();
++        return errorCode;
++    }
+     return 0;
+ }
+ 
+diff --git a/src/server/database/Database/MySQLConnection.h b/src/server/database/Database/MySQLConnection.h
+index e1b51836a..1067e49f9 100644
+--- a/src/server/database/Database/MySQLConnection.h
++++ b/src/server/database/Database/MySQLConnection.h
+@@ -78,6 +78,7 @@ public:
+     void BeginTransaction();
+     void RollbackTransaction();
+     void CommitTransaction();
++    bool CommitTransactionChecked();
+     int ExecuteTransaction(std::shared_ptr<TransactionBase> transaction);
+     std::size_t EscapeString(char* to, char const* from, std::size_t length);
+     void Ping();
+diff --git a/src/server/game/Entities/Item/Item.cpp b/src/server/game/Entities/Item/Item.cpp
+index b3de07789..f58248aa3 100644
+--- a/src/server/game/Entities/Item/Item.cpp
++++ b/src/server/game/Entities/Item/Item.cpp
+@@ -417,6 +417,43 @@ void Item::SaveToDB(CharacterDatabaseTransaction trans)
+         CharacterDatabase.CommitTransaction(trans);
+ }
+ 
++void Item::AppendNewItemPersistence(CharacterDatabaseTransaction trans) const
++{
++    if (!trans)
++        return;
++
++    uint8 index = 0;
++    CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_REP_ITEM_INSTANCE_SYNCH);
++    stmt->SetData(index, GetEntry());
++    stmt->SetData(++index, GetOwnerGUID().GetRawValue());
++    stmt->SetData(++index, GetGuidValue(ITEM_FIELD_CREATOR).GetCounter());
++    stmt->SetData(++index, GetGuidValue(ITEM_FIELD_GIFTCREATOR).GetCounter());
++    stmt->SetData(++index, GetCount());
++    stmt->SetData(++index, GetUInt32Value(ITEM_FIELD_DURATION));
++
++    std::ostringstream ssSpells;
++    for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
++        ssSpells << GetSpellCharges(i) << ' ';
++    stmt->SetData(++index, ssSpells.str());
++
++    stmt->SetData(++index, GetUInt32Value(ITEM_FIELD_FLAGS));
++
++    std::ostringstream ssEnchants;
++    for (uint8 i = 0; i < MAX_ENCHANTMENT_SLOT; ++i)
++    {
++        ssEnchants << GetEnchantmentId(EnchantmentSlot(i)) << ' ';
++        ssEnchants << GetEnchantmentDuration(EnchantmentSlot(i)) << ' ';
++        ssEnchants << GetEnchantmentCharges(EnchantmentSlot(i)) << ' ';
++    }
++    stmt->SetData(++index, ssEnchants.str());
++    stmt->SetData(++index, GetItemRandomPropertyId());
++    stmt->SetData(++index, GetUInt32Value(ITEM_FIELD_DURABILITY));
++    stmt->SetData(++index, GetUInt32Value(ITEM_FIELD_CREATE_PLAYED_TIME));
++    stmt->SetData(++index, m_text);
++    stmt->SetData(++index, GetGUID().GetCounter());
++    trans->Append(stmt);
++}
++
+ bool Item::LoadFromDB(ObjectGuid::LowType guid, ObjectGuid owner_guid, Field* fields, uint32 entry)
+ {
+     //                                                    0                1      2         3        4      5             6                 7           8           9    10
+diff --git a/src/server/game/Entities/Item/Item.h b/src/server/game/Entities/Item/Item.h
+index 7ee99e77b..fa3eecbcc 100644
+--- a/src/server/game/Entities/Item/Item.h
++++ b/src/server/game/Entities/Item/Item.h
+@@ -239,6 +239,9 @@ public:
+     [[nodiscard]] bool IsBoundByEnchant() const;
+     [[nodiscard]] bool IsBoundByTempEnchant() const;
+     virtual void SaveToDB(CharacterDatabaseTransaction trans);
++    // Append persistence for a new detached item; does not mutate state or
++    // execute the caller-owned transaction.
++    void AppendNewItemPersistence(CharacterDatabaseTransaction trans) const;
+     virtual bool LoadFromDB(ObjectGuid::LowType guid, ObjectGuid owner_guid, Field* fields, uint32 entry);
+     static void DeleteFromDB(CharacterDatabaseTransaction trans, ObjectGuid::LowType itemGuid);
+     virtual void DeleteFromDB(CharacterDatabaseTransaction trans);
+diff --git a/src/server/game/Entities/Player/Player.h b/src/server/game/Entities/Player/Player.h
+index b4ef4551b..ca7f77da6 100644
+--- a/src/server/game/Entities/Player/Player.h
++++ b/src/server/game/Entities/Player/Player.h
+@@ -1332,6 +1332,11 @@ public:
+     Item* StoreNewItem(ItemPosCountVec const& pos, uint32 item, bool update, int32 randomPropertyId = 0, bool refund = false);
+     Item* StoreNewItem(ItemPosCountVec const& pos, uint32 item, bool update, int32 randomPropertyId, AllowedLooterSet& allowedLooters, bool refund = false);
+     Item* StoreItem(ItemPosCountVec const& pos, Item* pItem, bool update);
++    void AppendDetachedInventoryPlacement(CharacterDatabaseTransaction trans, Item* pItem, ItemPosCountVec const& dest) const;
++
++    // Attach an item whose item_instance and character_inventory rows are
++    // already durable. This is memory/UI placement only; no DB work is done.
++    bool AttachPersistedItem(ItemPosCountVec const& pos, Item* pItem, bool update = true);
+     Item* EquipNewItem(uint16 pos, uint32 item, bool update);
+     Item* EquipItem(uint16 pos, Item* pItem, bool update);
+     void AutoUnequipOffhandIfNeed(bool force = false);
+diff --git a/src/server/game/Entities/Player/PlayerStorage.cpp b/src/server/game/Entities/Player/PlayerStorage.cpp
+index 79c67926d..c10c22cb9 100644
+--- a/src/server/game/Entities/Player/PlayerStorage.cpp
++++ b/src/server/game/Entities/Player/PlayerStorage.cpp
+@@ -2708,6 +2708,58 @@ Item* Player::StoreItem(ItemPosCountVec const& dest, Item* pItem, bool update)
+     return lastItem;
+ }
+ 
++void Player::AppendDetachedInventoryPlacement(CharacterDatabaseTransaction trans, Item* pItem, ItemPosCountVec const& dest) const
++{
++    if (!trans || !pItem || dest.empty())
++        return;
++
++    uint16 pos = dest.back().pos;
++    uint8 bag = pos >> 8;
++    uint8 slot = pos & 255;
++    ObjectGuid::LowType bagGuid = 0;
++    if (Bag* container = GetBagByPos(bag))
++        bagGuid = container->GetGUID().GetCounter();
++
++    CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_REP_INVENTORY_ITEM_SYNCH);
++    stmt->SetData(0, GetGUID().GetRawValue());
++    stmt->SetData(1, bagGuid);
++    stmt->SetData(2, slot);
++    stmt->SetData(3, pItem->GetGUID().GetCounter());
++    trans->Append(stmt);
++}
++
++bool Player::AttachPersistedItem(ItemPosCountVec const& dest, Item* pItem, bool update)
++{
++    if (!pItem || dest.empty())
++        return false;
++
++    // This primitive attaches a whole already-persisted item, never merges
++    // into an existing stack (which could destroy the caller-owned pointer).
++    for (ItemPosCount const& position : dest)
++        if (GetItemByPos(position.pos >> 8, position.pos & 255))
++            return false;
++
++    Item* storedItem = StoreItem(dest, pItem, update);
++    if (storedItem != pItem)
++        return false;
++
++    // StoreItem deliberately marks newly attached objects dirty. In this
++    // entry point persistence already committed before the memory attach, so
++    // remove the item and any containing bag from the update queue and leave
++    // both in the durable baseline state.
++    pItem->RemoveFromUpdateQueueOf(this);
++    pItem->SetState(ITEM_UNCHANGED);
++
++    uint16 finalPos = dest.back().pos;
++    if (Bag* bag = GetBagByPos(finalPos >> 8))
++    {
++        bag->RemoveFromUpdateQueueOf(this);
++        bag->SetState(ITEM_UNCHANGED);
++    }
++
++    return true;
++}
++
+ // Return stored item (if stored to stack, it can diff. from pItem). And pItem ca be deleted in this case.
+ Item* Player::_StoreItem(uint16 pos, Item* pItem, uint32 count, bool clone, bool update)
+ {
